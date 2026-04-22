@@ -1,0 +1,441 @@
+class EAirCamera extends ESecondaryAmmo
+	abstract;
+
+var	Rotator				camera_rotation;
+var EPlayerController	Epc;
+var float				MaxDamping;
+var bool				bDirectShot;
+
+// Backup controller setting
+var Texture				BackupThermalTexture;
+var bool				BackupbBigPixels;
+
+var int					RenderingMode;
+
+// Joshua - Track player state before entering camera to return properly
+var name				PlayerReturnState;
+
+const					CameraAdjustment = 5;
+
+function TakeView()
+{
+	Enable('Tick');
+
+	// Block the PlayerController. Ends in s_camera EndState
+	Epc.backupRotation = Epc.Rotation;
+	Epc.SetCameraFOV(self, Epc.DesiredFov);
+	Epc.SetBase(self);
+	Epc.SetRelativeLocation(-CameraAdjustment * Vect(1,0,0));
+	Epc.SetRelativeRotation(Rot(0,32767,0));
+	Epc.m_camera.GoToState('s_Fixed');
+	if (!Epc.bVideoMode)
+		Epc.bLockedCamera = true;
+	Epc.SetViewTarget(self);
+
+	Epc.bUsingCamera = true; // Joshua - True when the player is using a camera, prevents movement speed changes with mouse wheel
+
+	BackupThermalTexture= Epc.ThermalTexture;
+    BackupbBigPixels	= Epc.bBigPixels;
+
+	RenderingMode		= REN_DynLight;
+	Epc.SetCameraMode(self, RenderingMode);
+
+	//log("* * * TAKE"@RelativeLocation@RelativeRotation@Epc.backupRotation@Epc.FovAngle@Epc.Base@Epc.RelativeLocation@Epc.RelativeRotation@Epc.bLockedCamera@Epc.ViewTarget);
+
+	ObjectHud.GotoState('s_Online');
+}
+
+function GiveView(bool bFromPlayer)
+{
+	//log("* * * GIVE");
+	ObjectHud.GotoState('');
+
+	// Restore vision
+	Epc.PopCamera(self);
+	Epc.ThermalTexture	= BackupThermalTexture;
+    Epc.bBigPixels		= BackupbBigPixels;
+
+	// UnBlock the PlayerController
+	Epc.bLockedCamera = false;
+	Epc.bDisableWhistle = false;
+	Epc.m_camera.GotoState('s_Following');
+	Epc.SetRotation(Epc.backupRotation);
+	Epc.SetBase(None);
+	Epc.SetViewTarget(Epc.Pawn);
+	Epc.bUsingCamera = false; // Joshua - True when the player is using a camera, prevents movement speed changes with mouse wheel
+	Disable('Tick');
+
+	if (!bFromPlayer)
+		return;
+
+	Controller = None;
+
+	//if (!Epc.OnGroundScope())
+	//	Log("ERROR: OnGroundScope should never fail here.  Make sure everything's set so that it returns in FirstPersonTargeting");
+
+	// Joshua - Return to appropriate state based on where player came from
+	if (PlayerReturnState == '')
+	{
+		// Original behavior when shooting camera normally
+		if (!Epc.OnGroundScope())
+			Log("ERROR: OnGroundScope should never fail here.");
+	}
+	else if (PlayerReturnState == 's_FirstPersonTargeting')
+	{
+		// Only draw weapon if player was in s_FirstPersonTargeting before entering camera
+		if (!Epc.OnGroundScope())
+			Log("ERROR: OnGroundScope should never fail here.");
+	}
+	else if (PlayerReturnState == 's_Split')
+	{
+		// Stop the palm animation before returning to split
+		Epc.ePawn.AnimBlendToAlpha(Epc.ePawn.ACTIONCHANNEL, 0.0, 0.2);
+		Epc.GotoState('s_Split');
+	}
+	else if (PlayerReturnState == 's_SplitTargeting')
+	{
+		// Return to split jump targeting with weapon, call ReturnFromInteraction to handle redrawing
+		Epc.ePawn.AnimBlendToAlpha(Epc.ePawn.ACTIONCHANNEL, 0.0, 0.2);
+		Epc.ReturnFromInteraction();
+	}
+	else if (PlayerReturnState == 's_RappellingTargeting')
+	{
+		// Return to rappelling targeting, call OnGroundScope to restore rope and weapon
+		Epc.ePawn.AnimBlendToAlpha(Epc.ePawn.ACTIONCHANNEL, 0.0, 0.2);
+		if (!Epc.OnGroundScope())
+			Log("ERROR: OnGroundScope should never fail here.");
+	}
+	else if (PlayerReturnState == 's_Rappelling')
+	{
+		// Return to rappelling, go to Begin to restore rope
+		Epc.ePawn.AnimBlendToAlpha(Epc.ePawn.ACTIONCHANNEL, 0.0, 0.2);
+		EMainHUD(Epc.myHud).NormalView();
+		Epc.bInTransition = false;
+		Epc.GotoState('s_Rappelling', 'Begin');
+	}
+	else
+	{
+		// Stop the palm animation before returning to walking
+		Epc.ePawn.AnimBlendToAlpha(Epc.ePawn.ACTIONCHANNEL, 0.0, 0.2);
+		Epc.GotoState('s_PlayerWalking');
+	}
+
+	// Clear the return state
+	PlayerReturnState = '';
+}
+
+// Joshua - Allow player to switch back to this camera after leaving it
+function SwitchToCamera()
+{
+	if (bDeleteMe || bHidden)
+		return;
+
+	if (Epc == None)
+		return;
+
+	// Don't allow switching while camera is still flying
+	if (GetStateName() == 's_Flying')
+		return;
+
+	// Set the controller reference back
+	Controller = Epc;
+
+	// Joshua - Save the player's current state so we can return to it properly
+	// Only draw weapon on exit if player was in s_FirstPersonTargeting
+	PlayerReturnState = Epc.GetStateName();
+
+	// Put player in palm state first (camera is already in s_Camera state from when it landed)
+	if (!Epc.bVideoMode)
+		Epc.UsePalm();
+
+	// Set up the HUD to slave to this camera
+	EMainHUD(Epc.myHud).Slave(self);
+
+	// Camera should already be in s_Camera state, but just in case
+	if (GetStateName() != 's_Camera')
+		GotoState('s_Camera');
+
+	// These are normally done in s_Camera.BeginState but we may already be in that state
+	//WallAdjust();
+	Epc.bDisableWhistle = true;
+}
+
+// Joshua - Check if camera can be switched to
+function bool CanSwitchTo()
+{
+	return !bDeleteMe && !bHidden && GetStateName() != 's_Flying';
+}
+
+function HudView(bool bIn)
+{
+	//Log("HUD VIEW!!!"@bIn@Controller);
+
+	if (Controller == None)
+		return;
+	if (bIn)
+	{
+		TakeView();
+		WallAdjust();
+	}
+	else
+		GiveView(false);
+}
+
+function WallAdjust()
+{
+	// set once Camera location
+	Epc.SetRelativeLocation(CameraAdjustment * Vect(1,0,0));
+	Epc.SetRelativeRotation(Rot(0,0,0));
+}
+
+function Select(EInventory Inv)
+{
+	Super.Select(Inv);
+
+	// Joshua - Don't play sound during silent restore (sorting)
+	if (!Inv.bSilentRestore)
+		PlaySound(Sound'Interface.Play_FisherEquipStickyCam', SLOT_Interface);
+}
+
+
+// Joshua - Clear previous camera reference when camera is picked back up
+function bool NotifyPickup(Controller Instigator)
+{
+	if (Instigator != None && Instigator.bIsPlayer)
+		EPlayerController(Instigator).ClearPreviousCamera(self);
+
+	return Super.NotifyPickup(Instigator);
+}
+
+function rotator GetStillRotation(vector HitNormal)
+{
+	return FindSlopeRotation(HitNormal, Rotation);
+}
+
+function Throw(Controller Thrower, vector ThrowVelocity)
+{
+	// Joshua - Clear previous camera reference when throwing a new one
+	if (EPlayerController(Thrower) != None)
+		EPlayerController(Thrower).ClearPreviousCamera();
+
+	bDirectShot = true;
+	Super.Throw(Thrower, ThrowVelocity);
+}
+
+function HitFakeBackDrop()
+{
+	if (Controller != None && Epc != None)
+		GiveView(true);
+
+	// Joshua - Clear reference before destruction
+	if (Epc != None)
+		Epc.ClearPreviousCamera(self);
+
+	Super.HitFakeBackDrop();
+}
+
+// In '' state, after camera
+function HitWall(Vector HitNormal, Actor Wall)
+{
+	Velocity = (5 + (FRand() * 75)) * (Vector(Rotation) + HitNormal);
+	TakeHit();
+	SetCollision(false);
+}
+
+state s_Flying
+{
+	Ignores WallAdjust;
+
+	function BeginState()
+	{
+		Epc = EPlayerController(Controller);
+		if (Epc != None)
+		{
+			EMainHUD(Epc.myHud).Slave(self);
+			// Joshua - Set PreviousCamera immediately when thrown so player can switch back
+			Epc.PreviousCamera = self;
+		}
+
+		Super.BeginState();
+	}
+
+	function Bump(Actor Other, optional int Pill)
+	{
+		if (Other.bIsPawn || Other.bIsSoftBody)
+			bDirectShot = false;
+
+		Super.Bump(Other, Pill);
+	}
+
+	function HitWall(Vector HitNormal, Actor Wall)
+	{
+		local rotator initial_rotation;
+
+		// Don't stick if wall ...
+		if ((Controller == None && !bDirectShot) ||	// was already used
+			Wall.bIsPawn ||							// is a pawn
+			(Wall.bIsGameplayObject && (EInventoryItem(Wall)!=None || EGameplayObject(Wall).DestroyTime == Level.TimeSeconds)) || // is another inventory item
+			(Wall.bIsGameplayObject && Wall.CollisionPrimitive == None && Wall.bStaticMeshCylColl) ||
+			(!bDirectShot && HitNormal.Z < 0.7f) ||	// is a rebound and foor z too abrupt
+			Wall.IsA('EBreakableGlass'))			// is a breakable glass because will shatter
+		{
+			bDirectShot = false;
+			Super.HitWall(HitNormal, Wall);
+			return;
+		}
+
+		// Fix rotation on wall direction if direct shot
+		if (bDirectShot)
+			initial_rotation = Normalize(Rotator(HitNormal));
+		else
+			initial_rotation = FindSlopeRotation(HitNormal, Rotation);
+		SetRotation(initial_rotation);
+
+		bDirectShot = false;
+
+		// Do this to prevent camera from moving on wall
+		SetPhysics(PHYS_None);
+		bFixedRotationDir = false;
+		RotationRate = Rot(0,0,0);
+
+		// Has to stick on wall,mover, etc .. if it moves
+		SetBase(Wall);
+
+		// Give pickup interaction
+		Interaction = Spawn(InteractionClass, self);
+
+		// Prevent camera from taking control is Player is dead
+		if (Controller == None)
+		{
+			GotoState('');
+			return;
+		}
+
+		// Remove possibility to launch another cam while one already in the air
+		if (Controller.GetStateName() != 's_FrozenInput')
+			GotoState('s_Camera');
+	}
+
+	function Tick(float deltaTime)
+	{
+		local bool bShouldExitOnDuck;
+
+		if (Epc == None)
+			return;
+
+		// Joshua - Allow duck to exit camera if using keyboard or using controller with default scheme
+		bShouldExitOnDuck = !Epc.eGame.bUseController || Epc.ControllerScheme == CS_Default;
+
+		// if player is dead, stop processing
+		if (Epc.bFire != 0 || (bShouldExitOnDuck && Epc.bDuck != 0) || Epc.Pawn.Health <= 0)
+		{
+			if (bShouldExitOnDuck)
+				Epc.bDuck = 0;
+			GiveView(true);
+		}
+	}
+}
+
+//------------------------------------------------------------------------
+// state s_Camera - Camera is in Use
+//------------------------------------------------------------------------
+state s_Camera
+{
+	function BeginState()
+	{
+		Level.AddChange(self, CHANGE_AirCamera);
+
+		// Joshua - Only call UsePalm if player is not already in s_UsingPalm
+		// This prevents EndState from triggering prematurely when using SwitchCam
+		// SwitchToCamera already calls UsePalm before transitioning camera to s_Camera
+		if (!Epc.bVideoMode && Epc.GetStateName() != 's_UsingPalm')
+			Epc.UsePalm();
+
+		WallAdjust();
+
+		Epc.m_camera.Tilt(2000, 50000, 5000);
+
+		Epc.bDisableWhistle = true;
+	}
+
+	// same as Normalize for a rotator but for an int only
+	function int CenterToZero(int v)
+	{
+		v = v & 65535;
+		if (v >= 32769)
+			v -= 65536;
+		return v;
+	}
+
+	function int GetIntInRange(int iStart, int iRange, int iCur)
+	{
+		local int iDelta;
+		iDelta = CenterToZero(iCur - iStart);
+		if (iDelta < 0)
+			return CenterToZero(iStart + Max(-iRange, iDelta));
+		else
+			return CenterToZero(iStart + Min(iRange, iDelta));
+	}
+
+	function Tick(float deltaTime)
+	{
+		local Rotator previous_rotation, delta_rotation, clamped_rotation;
+		local float deltaMov;
+		local bool bShouldExitOnDuck;
+
+		previous_rotation = camera_rotation;
+
+		// Set camera rotation from player camera movement.
+		// MaxDamping is set in sub-classes depending on camera type
+		clamped_rotation		= camera_rotation;
+		clamped_rotation.Yaw   += Epc.aTurn * MaxDamping;
+		clamped_rotation.Pitch -= Epc.aLookUp * MaxDamping;
+
+		camera_rotation.Yaw = GetIntInRange(0, 8191, clamped_rotation.Yaw);
+		camera_rotation.Pitch = GetIntInRange(0, 8191, clamped_rotation.Pitch);
+
+		// Motor rumble
+		delta_rotation = previous_rotation - camera_rotation;
+		if (delta_rotation != Rot(0,0,0))
+		{
+			deltaMov = (FMax(Abs(delta_rotation.Pitch), Abs(delta_rotation.Yaw)) / MaxDamping);
+			if (FRand() > 0.5)
+				Epc.m_camera.Hit(60 * deltaMov, 20000, true);
+			else
+				Epc.m_camera.Hit(-60 * deltaMov, 20000, true);
+			Level.RumbleVibrate(0.07f, deltaMov * 0.5);
+		}
+
+		// control Camera
+		Epc.m_camera.UpdateView(camera_rotation, true);
+
+		// Joshua - Allow duck to exit camera if using keyboard or using controller with default scheme
+		bShouldExitOnDuck = !Epc.eGame.bUseController || Epc.ControllerScheme == CS_Default;
+
+		// if player is dead, stop processing
+		if (Epc.bFire != 0 || (bShouldExitOnDuck && Epc.bDuck != 0)|| Epc.Pawn.Health <= 0)
+		{
+			Epc.bFire = 0;
+			if (bShouldExitOnDuck)
+				Epc.bDuck = 0;
+			GiveView(true);
+		}
+	}
+}
+
+//------------------------------------------------------------------------
+// Description
+//		Do treatment depending on light vars (50% of the visibility)
+//------------------------------------------------------------------------
+event VisibilityRating GetActorVisibility()
+{
+	return VisibilityTableLookup(GetVisibilityFactor() / 2);
+}
+
+defaultproperties
+{
+    MaxDamping=400.000000
+    ChangeListWhenThrown=False
+    CollisionRadius=1.000000
+    CollisionHeight=2.000000
+}
