@@ -9,8 +9,8 @@ event bool KeyEvent(EInputKey Key, EInputAction Action, FLOAT Delta)
    {
       return false;
    }
-   else if (Key == IK_F4)
+   else if (Key == IK_F4 && Action == IST_PRESS)
    {
-      ConsoleCommand(-LOG);
+      ConsoleCommand("-LOG");
    }
 }
