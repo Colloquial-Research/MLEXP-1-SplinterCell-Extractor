@@ -1,88 +1,79 @@
-# Query's windows process for SplinterCell.exe and prints 4-byte value from address
-import win32api
-import win32process
-import ctypes
-import time
-import socket
 import json
+import socket
+import time
 
-PROCESS_VM_READ = 0x0010
-PROCESS_QUERY_INFORMATION = 0x0400
+from pymem import Pymem
 
-# Splinter Cell address
-exe_name = "SplinterCell.exe"
-
-# Simple JSON-over-TCP export
+GAME_EXE = "SplinterCell.exe" # Needs to be exact name of running process
 HOST = "127.0.0.1"
-PORT = 65432
+PORT = 60001
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((HOST, PORT))
-server.listen()
+def read_bytes(pm, addr, size):
+    # Reads raw bytes from process at address
+    return bytes(pm.read_bytes(addr, size))
 
-print(f"Export server listening on {HOST}:{PORT}")
+def read_typed(pm, addr, fmt):
+    # Read struct.pack format code
+    raw = read_bytes(pm, addr, struct,calcsize(fmt))
+    return struct.unpack(fmt, raw)[0]
 
-def find_process_id(exe_name):
-    # Find PID by executable name.
-    for pid in win32process.EnumProcesses():
+def read_npc_list(pm):
+    # Recontrust list of visible NPCs from memory
+    ptr_to_array = read_typed(pm, NPC_LIST_PTR, "i")
+    array_base = ptr_to_array + NPC_LIST_OFFSET
+
+    npcs = []
+    for i in range(NPC_COUNT_MAX):
+        npc = {"index": i, "active": False}
+        npc_addr = array_base + i * NPC_SIZE
+
         try:
-            h = win32api.OpenProcess(
-                PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
-                False,
-                pid
-            )
-            name = win32process.GetModuleFileNameEx(h, 0)
-            win32api.CloseHandle(h)
-            if exe_name.lower() in name.lower():
-                return pid
-        except:
+            # Read each known field, skip non-visible or dead NPCs
+            for field_name, field_offset, field_fmt in NPC_STRUCT:
+                val_addr = npc_addr + field_offset
+                val = read_typed(pm, val_addr, field_fmt)
+                npc[field_name] = val
+            
+            if npc["state"] > 0 and npc["health"] > 0:
+                npc["active"] = True
+                npcs.append(npc)
+        except Exception:
             pass
-    return None
-
-def read_int(h_process, address, size=4):
-    # Read integer from memory
-    buf = (ctypes.c_char * size)()
-    bytes_read = ctypes.c_size_t()
-    success = ctypes.windll.kernel32.ReadProcessMemory(
-        int(h_process),
-        address,
-        buf,
-        size,
-        ctypes.byref(bytes_read)
-    )
-    if success:
-        return int.from_bytes(buf.raw, "little")
-    return None
-
-while True:
-    conn = None
-    try:
-        conn, addr = server.accept()
-        print("Client connected:", addr)
-
-        last_value = None
-        while True:
-            value = read_int(h_game, 0x12345678) # Cheat Engine address
-            if value is None:
-                break
-            
-            if value != last_value:
-                data = {
-                    "missionValue:" value,
-                    "timestamp": time.time()
-                }
-                msg = json.dumps(data).encode("utf-8") + b"\n"
-                try:
-                    conn.sendall(msg)
-                except:
-                    break
-                last_value = value
-            
-            time.sleep(0.05)
     
-    except Exception as e:
-        print("Server error:", e)
+    return npcs
+
+def serve_json_stream():
+    # JSON-over-TCP
+    pm = Pymem(GAME_EXE)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((HOST, PORT))
+    sock.listen(1)
+
+    print(f"Listening on {HOST}:{PORT} for JSON clients...")
+    client_conn, addr = sock.accept()
+    print(f"Client connected: {addr}")
+
+    try:
+        while True:
+            try:
+                npcs = read_npc_list(pm)
+                data = {"timestamp": time.time(), "npcs": npcs}
+                json_payload = json.dumps(data).encode("utf-8") + b"\n"
+                client_conn.sendall(json_payload)
+                time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                print("Client disconnected, waiting for reconnection...")
+                client_conn.close()
+                client_conn, addr = sock.accept()
+                print(f"New client: {addr}")
+    except KeyboardInterrupt:
+        print("Shutting down server...")
     finally:
-        if conn:
-            conn.close()
+        client_conn.close()
+        sock.close()
+        pm.close_process()
+
+if __name__ == "__main__":
+    serve_json_stream()
