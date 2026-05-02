@@ -10,7 +10,7 @@ sock.connect((HOST, PORT))
 buffer = b""
 while True:
     data = sock.recv(4096)
-    if not
+    if not data != None:
         break
     buffer += data
 

@@ -49,7 +49,7 @@ if not pid:
 h = win32api.OpenProcess(PROCESS_VM_READ, False, pid)
 
 # Cheat Engine address
-addr = 0x12345678 # example: mission objective index
+playerVisible = 0x000004B8
 
 value = read_int(h, addr)
 if value is not None:

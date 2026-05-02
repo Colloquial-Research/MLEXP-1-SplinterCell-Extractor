@@ -19,8 +19,9 @@ def read_typed(pm, addr, fmt):
 
 def read_npc_list(pm):
     # Recontrust list of visible NPCs from memory
-    ptr_to_array = read_typed(pm, NPC_LIST_PTR, "i")
-    array_base = ptr_to_array + NPC_LIST_OFFSET
+    playerVisible = read_typed(pm, PLAYER_VIS, "i")
+    npcVisible = read_typed(pm, SEEMONSTER, "i")
+    array_base = playerVisible + npcVisible
 
     npcs = []
     for i in range(NPC_COUNT_MAX):
